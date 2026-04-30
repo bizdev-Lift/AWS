@@ -75,15 +75,15 @@ class LiftCommerceWebShipAPI:
 
         url = f"{self.base_url}/customers/{self.customer_id}/integrations/{self.integration_id}/orders/{order_id}"
 
+        # Per Ray (Apr 30 demo): orders should land in WebShip queue without
+        # a service preselected so AWDUS staff pick the carrier on their side
+        # and avoid auto-print of ground economy. Empty string was rejected
+        # by Lift validator (min length), so omit the key entirely.
         payload = {
             "orderId": str(order_id),
             "orderDate": order_date,
             "orderNumber": order_number,
             "fulfillmentStatus": "pending",
-            # No shippingService preselected — per Ray (Apr 30 demo): orders
-            # should land in WebShip queue without a service so AWDUS staff
-            # can pick the carrier/service themselves and avoid auto-print.
-            "shippingService": "",
             "shippingTotal": str(shipping_total),
             "weightUnit": weight_unit,
             "dimUnit": dim_unit,
