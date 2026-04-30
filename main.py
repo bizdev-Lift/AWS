@@ -843,10 +843,10 @@ class LiftCommerceConnector:
             }
 
             # Build items list from Odoo order lines.
-            # Lift's PUT order has a strict schema with EXACTLY these fields:
-            # sku, productId, title, price, imgUrl, htsNumber, countryOfOrigin,
-            # lineId, quantity. Adding `name`, `unitPrice`, `weight` etc. gets
-            # rejected as "Additional object properties are not allowed".
+            # Lift's PUT order has a strict schema. Required fields per their
+            # 422 errors: sku, productId, title, price, imgUrl, htsNumber,
+            # countryOfOrigin, lineId, weight. Adding fields outside this
+            # set ("Additional object properties are not allowed").
             items = []
             for idx, p in enumerate(awds_order.products, start=1):
                 items.append({
@@ -856,6 +856,7 @@ class LiftCommerceConnector:
                     "title": p.name,
                     "quantity": p.quantity,
                     "price": str(p.price or 0),
+                    "weight": str(p.weight or 0),
                     "imgUrl": "",
                     "htsNumber": "",
                     "countryOfOrigin": "US",
