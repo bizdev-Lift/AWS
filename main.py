@@ -810,15 +810,23 @@ class LiftCommerceConnector:
                 "email": "",
             }
 
-            # Build items list from Odoo order lines
+            # Build items list from Odoo order lines.
+            # Lift's PUT order requires these exact field names per their 422
+            # response: productId, title, price, imgUrl, htsNumber,
+            # countryOfOrigin, lineId. Empty strings are acceptable for the
+            # ones we don't have (imgUrl, htsNumber).
             items = []
-            for p in awds_order.products:
+            for idx, p in enumerate(awds_order.products, start=1):
                 items.append({
-                    "sku": p.sku,
-                    "name": p.name,
+                    "lineId": str(idx),
+                    "productId": p.sku,
+                    "title": p.name,
                     "quantity": p.quantity,
-                    "unitPrice": str(p.price or 0),
+                    "price": str(p.price or 0),
                     "weight": str(p.weight or 0),
+                    "imgUrl": "",
+                    "htsNumber": "",
+                    "countryOfOrigin": "US",
                 })
 
             order_date = awds_order.date_order.strftime("%Y-%m-%d") if awds_order.date_order else datetime.now().strftime("%Y-%m-%d")
