@@ -847,13 +847,23 @@ class LiftCommerceConnector:
             # 422 errors: sku, productId, title, price, imgUrl, htsNumber,
             # countryOfOrigin, lineId, weight. Adding fields outside this
             # set ("Additional object properties are not allowed").
+            #
+            # Odoo returns False (not "") for empty fields like default_code,
+            # which Lift's typed validator rejects as a type mismatch. Coerce
+            # everything to string and use a placeholder SKU when missing.
+            def s(val, default=""):
+                if val is None or val is False:
+                    return default
+                return str(val)
+
             items = []
             for idx, p in enumerate(awds_order.products, start=1):
+                sku_value = s(p.sku) or f"PRODUCT-{idx}"
                 items.append({
                     "lineId": str(idx),
-                    "sku": p.sku,
-                    "productId": p.sku,
-                    "title": p.name,
+                    "sku": sku_value,
+                    "productId": sku_value,
+                    "title": s(p.name) or f"Item {idx}",
                     "quantity": p.quantity,
                     "price": str(p.price or 0),
                     "weight": str(p.weight or 0),
