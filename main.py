@@ -621,6 +621,38 @@ class OdooConnector:
             logger.error(f"Error fetching ready orders: {e}")
             return []
 
+    async def post_failure_note(self, order_id: int, order_name: str, error: str) -> bool:
+        """
+        Post an internal chatter note on a sale.order when the connector
+        couldn't push it to WebShip (validation failure, API error, etc.).
+        Uses mail.mt_note subtype so AWDUS staff see it on the order's
+        chatter without sending an email to the customer.
+        """
+        try:
+            await self.authenticate()
+            note = (
+                f"⚠️ Lift Commerce Connector could not push this order to WebShip.\n\n"
+                f"Reason: {error}\n\n"
+                f"Please correct the order in Odoo (e.g. shipping address, "
+                f"recipient name) — the connector will retry automatically on "
+                f"the next sync cycle (every 5 minutes)."
+            )
+            self.models.execute_kw(
+                ODOO_DB, self.uid, ODOO_API_KEY,
+                'sale.order', 'message_post',
+                [[order_id]],
+                {
+                    'body': note,
+                    'message_type': 'comment',
+                    'subtype_xmlid': 'mail.mt_note',
+                },
+            )
+            logger.info(f"Odoo: posted failure note on sale.order {order_name} (id {order_id})")
+            return True
+        except Exception as e:
+            logger.warning(f"Odoo: failed to post failure note for {order_name} (non-fatal): {e}")
+            return False
+
     async def update_tracking_in_odoo(
         self,
         order_name: str,
@@ -811,18 +843,21 @@ class LiftCommerceConnector:
             }
 
             # Build items list from Odoo order lines.
-            # Lift's PUT order requires these exact field names per their 422
-            # response: productId, title, price, imgUrl, htsNumber,
-            # countryOfOrigin, lineId. Empty strings are acceptable for the
-            # ones we don't have (imgUrl, htsNumber).
+            # Lift's PUT order requires these field names per their 422 errors:
+            # sku, productId, title, price, imgUrl, htsNumber, countryOfOrigin,
+            # lineId. Empty strings are acceptable for fields we don't have in
+            # Odoo (imgUrl, htsNumber).
             items = []
             for idx, p in enumerate(awds_order.products, start=1):
                 items.append({
                     "lineId": str(idx),
+                    "sku": p.sku,
                     "productId": p.sku,
                     "title": p.name,
+                    "name": p.name,
                     "quantity": p.quantity,
                     "price": str(p.price or 0),
+                    "unitPrice": str(p.price or 0),
                     "weight": str(p.weight or 0),
                     "imgUrl": "",
                     "htsNumber": "",
@@ -998,6 +1033,14 @@ async def process_orders():
                     """, (str(e)[:500], order_id))
                     cursor.close()
                     logger.warning(f"❌ Order {order_id} processing failed: {e}")
+
+                # Post a note on the Odoo sale.order so AWDUS staff see why
+                # this order isn't flowing through. Best-effort, non-fatal.
+                order_name = order_data.get('order_name') if isinstance(order_data, dict) else ''
+                try:
+                    await odoo_connector.post_failure_note(order_id, order_name, str(e)[:500])
+                except Exception as note_err:
+                    logger.warning(f"Failure-note post failed for {order_id}: {note_err}")
 
     except Exception as e:
         logger.error(f"Error in process_orders: {e}")

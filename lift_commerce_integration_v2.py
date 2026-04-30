@@ -80,7 +80,10 @@ class LiftCommerceWebShipAPI:
             "orderDate": order_date,
             "orderNumber": order_number,
             "fulfillmentStatus": "pending",
-            "shippingService": "Standard",
+            # No shippingService preselected — per Ray (Apr 30 demo): orders
+            # should land in WebShip queue without a service so AWDUS staff
+            # can pick the carrier/service themselves and avoid auto-print.
+            "shippingService": "",
             "shippingTotal": str(shipping_total),
             "weightUnit": weight_unit,
             "dimUnit": dim_unit,
