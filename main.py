@@ -594,11 +594,25 @@ class OdooConnector:
             logger.error(f"Error fetching ready orders: {e}")
             return []
 
-    async def update_tracking_in_odoo(self, order_name: str, tracking_number: str, carrier: str = "FedEx") -> bool:
+    async def update_tracking_in_odoo(
+        self,
+        order_name: str,
+        tracking_number: str,
+        carrier: str = "FedEx",
+        secondary_tracking: Optional[str] = None,
+        service_code: str = "",
+    ) -> bool:
         """
         Write tracking number back to Odoo delivery order (stock.picking).
         Only updates carrier_tracking_ref — does NOT change order state to avoid
         triggering unwanted automations (email notifications, etc.).
+
+        For multi-leg shipments (e.g. FedEx SmartPost) where Lift sends both a
+        carrier parent number and a sub-leg number, both are written to
+        carrier_tracking_ref joined by " / " so AWDUS staff can match WebShip's
+        display to Odoo without confusion. When the service is SmartPost, an
+        internal chatter note is also posted on the sale order explaining the
+        dual-tracking relationship (mt_note subtype — no email goes out).
         """
         try:
             await self.authenticate()
@@ -651,14 +665,62 @@ class OdooConnector:
                 logger.warning(f"Odoo: No suitable picking found for {order_name}")
                 return False
 
+            # Build the tracking value — concatenate primary + secondary when both
+            # are present and distinct. SmartPost dual-tracking surfaces here:
+            # e.g. "61290386139620652543 / 398579708303".
+            if secondary_tracking and secondary_tracking != tracking_number:
+                tracking_value = f"{tracking_number} / {secondary_tracking}"
+            else:
+                tracking_value = tracking_number
+
             # Only update carrier_tracking_ref — nothing else
             self.models.execute_kw(
                 ODOO_DB, self.uid, ODOO_API_KEY,
                 'stock.picking', 'write',
-                [[target_picking['id']], {'carrier_tracking_ref': tracking_number}]
+                [[target_picking['id']], {'carrier_tracking_ref': tracking_value}]
             )
 
-            logger.info(f"Odoo: Updated tracking for {order_name} → {tracking_number} (picking {target_picking['id']})")
+            logger.info(f"Odoo: Updated tracking for {order_name} → {tracking_value} (picking {target_picking['id']})")
+
+            # For SmartPost, post an internal chatter note on the sale order
+            # explaining the dual-tracking-number relationship. This heads off the
+            # recurring "WebShip and Odoo numbers don't match" question from
+            # AWDUS staff. Uses subtype mail.mt_note → internal-only, no email.
+            is_smartpost = (
+                'smart_post' in service_code.lower()
+                or 'smartpost' in service_code.lower()
+            )
+            if is_smartpost:
+                try:
+                    note_html = (
+                        f"<p>📦 Tracking updated: <code>{tracking_number}</code></p>"
+                        "<p><em>This is a FedEx SmartPost shipment. WebShip may "
+                        "display a shorter USPS handoff number"
+                    )
+                    if secondary_tracking:
+                        note_html += f" (<code>{secondary_tracking}</code>)"
+                    note_html += (
+                        " for the last-mile delivery — both numbers track the "
+                        "same parcel. Either can be entered at fedex.com.</em></p>"
+                    )
+                    self.models.execute_kw(
+                        ODOO_DB, self.uid, ODOO_API_KEY,
+                        'sale.order', 'message_post',
+                        [sale_order_ids],
+                        {
+                            'body': note_html,
+                            'message_type': 'comment',
+                            'subtype_xmlid': 'mail.mt_note',
+                        },
+                    )
+                    logger.info(f"Odoo: Posted SmartPost note on sale.order for {order_name}")
+                except Exception as note_err:
+                    # Chatter post is non-critical — log and continue
+                    logger.warning(
+                        f"Odoo: SmartPost note post failed for {order_name} "
+                        f"(non-fatal): {note_err}"
+                    )
+
             return True
 
         except Exception as e:
@@ -830,8 +892,7 @@ async def process_orders():
                         break
 
                 if not target_order:
-                    logger.warning(f"Order {order_id} not found in Odoobash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)
-")
+                    logger.warning(f"Order {order_id} not found in Odoo")
                     continue
 
                 # Create shipment using Book Shipment API
@@ -1125,8 +1186,20 @@ async def tracking_webhook(request: Request, payload: dict):
         # Extract fields — handle both WebShip formats
         external_id = payload.get('external_id') or payload.get('orderId') or payload.get('shipmentReference')
         tracking_number = payload.get('tracking_number') or payload.get('trackingNumber') or payload.get('trackID')
+        # Multi-leg shipments (e.g. FedEx SmartPost) may include a secondary
+        # tracking number for the last-mile leg. Capture it under any of the
+        # likely field names so we don't silently drop it.
+        secondary_tracking = (
+            payload.get('secondary_tracking')
+            or payload.get('secondaryTrackingNumber')
+            or payload.get('smart_post_number')
+            or payload.get('smartPostNumber')
+            or payload.get('subTrackingNumber')
+            or payload.get('uspsTrackingNumber')
+        )
         order_status = payload.get('status', 'shipped')
         carrier = payload.get('carrier', payload.get('carrierCode', 'FedEx'))
+        service_code = payload.get('service') or payload.get('serviceCode') or payload.get('service_code') or ''
 
         if not external_id:
             logger.warning(f"Webhook missing order identifier: {payload}")
@@ -1160,7 +1233,9 @@ async def tracking_webhook(request: Request, payload: dict):
                     odoo_updated = await odoo_connector.update_tracking_in_odoo(
                         order_name=external_id,
                         tracking_number=tracking_number,
-                        carrier=carrier
+                        carrier=carrier,
+                        secondary_tracking=secondary_tracking,
+                        service_code=service_code,
                     )
                 except Exception as odoo_err:
                     # Log but don't fail the webhook — tracking is saved in our DB
