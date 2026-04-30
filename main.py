@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 import mysql.connector
 from mysql.connector import Error
 from lift_commerce_integration import LiftCommerceAPI, ShipmentResult
+from lift_commerce_integration_v2 import LiftCommerceWebShipAPI, OrderResult
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -335,6 +336,7 @@ if not all([ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_API_KEY]):
 # Lift Commerce API Configuration - Must be set via environment variables
 LIFT_API_KEY = os.environ.get('LIFT_API_KEY')
 LIFT_CUSTOMER_ID = os.environ.get('LIFT_CUSTOMER_ID')
+LIFT_INTEGRATION_ID = os.environ.get('LIFT_INTEGRATION_ID')
 LIFT_API_BASE_URL = os.environ.get('LIFT_API_BASE_URL', 'https://login.liftcommerce.io/restapi/v1')
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
 
@@ -756,12 +758,20 @@ class OdooConnector:
 
 
 class LiftCommerceConnector:
-    """Production Lift Commerce API connector using Book Shipment"""
+    """
+    Pushes orders into the Lift Commerce WebShip queue (PUT order).
+
+    Does NOT auto-create FedEx labels. AWDUS staff finalize shipping in
+    WebShip on their own — picking carrier, weight, packaging — and Lift's
+    webhook back to /webhook/tracking is what writes the tracking number
+    to Odoo.
+    """
 
     def __init__(self):
-        self.api = LiftCommerceAPI(
+        self.api = LiftCommerceWebShipAPI(
             api_key=LIFT_API_KEY,
             customer_id=LIFT_CUSTOMER_ID,
+            integration_id=LIFT_INTEGRATION_ID,
             dry_run=DRY_RUN
         )
         self.warehouse_address = {
@@ -777,17 +787,16 @@ class LiftCommerceConnector:
             "email": "warehouse@awds.com"
         }
 
-    async def create_shipment(self, awds_order: AWDSOrder) -> ShipmentResult:
+    async def queue_order(self, awds_order: AWDSOrder) -> OrderResult:
         """
-        Create shipping label using Lift Commerce Core API Book Shipment
-        Returns ShipmentResult with book_number and tracking_number
+        Push an order into the WebShip queue. Returns OrderResult with
+        success/order_id; tracking arrives later via webhook from Lift.
         """
         try:
             address_errors = awds_order.shipping_address.validate()
             if address_errors:
                 raise ValueError(f"Address validation failed: {', '.join(address_errors)}")
 
-            # Build receiver address from Odoo order
             receiver = {
                 "name": awds_order.shipping_address.name,
                 "company": "",
@@ -799,43 +808,41 @@ class LiftCommerceConnector:
                 "country": awds_order.shipping_address.country,
                 "phone": awds_order.shipping_address.phone or "",
                 "email": "",
-                "residential": True
             }
 
-            # Build packages from order products
-            total_weight = sum(p.get_weight() * p.quantity for p in awds_order.products)
-            total_value = awds_order.total_amount
+            # Build items list from Odoo order lines
+            items = []
+            for p in awds_order.products:
+                items.append({
+                    "sku": p.sku,
+                    "name": p.name,
+                    "quantity": p.quantity,
+                    "unitPrice": str(p.price or 0),
+                    "weight": str(p.weight or 0),
+                })
 
-            packages = [{
-                "weight": total_weight if total_weight > 0 else 1.0,
-                "length": 12.0,
-                "width": 10.0,
-                "height": 8.0,
-                "value": total_value
-            }]
+            order_date = awds_order.date_order.strftime("%Y-%m-%d") if awds_order.date_order else datetime.now().strftime("%Y-%m-%d")
 
-            # Book shipment with FedEx SmartPost (PRIMARY service)
-            result = self.api.book_shipment(
-                order_reference=awds_order.name,
+            result = self.api.put_order(
+                order_id=str(awds_order.id),
+                order_number=awds_order.name,
+                order_date=order_date,
                 sender=self.warehouse_address,
                 receiver=receiver,
-                packages=packages,
-                service_code="fedex_smart_post"
+                items=items,
+                shipping_total=0.0,
             )
 
             if result.success:
-                logger.info(
-                    f"✅ Shipment created for order {awds_order.name}: "
-                    f"Book #{result.book_number}, Tracking #{result.tracking_number}"
-                )
+                logger.info(f"✅ Order {awds_order.name} pushed to WebShip queue (order_id={result.order_id})")
             else:
-                logger.error(f"❌ Failed to create shipment for order {awds_order.name}: {result.error_message}")
+                logger.error(f"❌ Failed to push {awds_order.name} to WebShip: {result.error_message}")
 
             return result
 
         except Exception as e:
-            logger.error(f"Error creating shipment for order {awds_order.name}: {e}")
-            return ShipmentResult(success=False, error_message=str(e))
+            logger.error(f"Error queueing order {awds_order.name}: {e}")
+            return OrderResult(success=False, error_message=str(e))
 
 # Initialize connectors
 odoo_connector = OdooConnector()
@@ -942,27 +949,27 @@ async def process_orders():
                         stale_cur.close()
                     continue
 
-                # Create shipment using Book Shipment API
-                result = await lc_connector.create_shipment(target_order)
+                # Push order into WebShip queue (NOT auto-create label).
+                # AWDUS staff finalize shipping in WebShip; tracking arrives
+                # later via webhook back to /webhook/tracking.
+                result = await lc_connector.queue_order(target_order)
 
                 if result.success:
-                    # Store tracking information in database
                     if db_manager.connection:
-                        label_url = lc_connector.api.get_label_url(result.book_number)
-
-                        db_manager.update_order_tracking(
-                            order_id=order_id,
-                            book_number=result.book_number,
-                            tracking_number=result.tracking_number,
-                            carrier_code=result.carrier_code,
-                            service_code=result.service_code,
-                            label_url=label_url
-                        )
-
-                        logger.info(
-                            f"✅ Order {order_data['order_name']} shipped successfully: "
-                            f"Book #{result.book_number}, Tracking #{result.tracking_number}"
-                        )
+                        ok_cur = db_manager.connection.cursor()
+                        ok_cur.execute("""
+                            UPDATE processed_orders
+                            SET status = 'synced',
+                                last_sync_attempt = NOW(),
+                                error_message = NULL,
+                                lift_commerce_id = %s
+                            WHERE order_id = %s
+                        """, (result.order_id, order_id))
+                        ok_cur.close()
+                    logger.info(
+                        f"✅ Order {order_data['order_name']} pushed to WebShip queue "
+                        f"(awaiting manual labeling on Lift side)"
+                    )
                 else:
                     raise Exception(result.error_message or "Unknown error")
 
