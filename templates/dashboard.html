@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lift Commerce Connector</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-primary">
+        <div class="container-fluid">
+            <span class="navbar-brand"><i class="fas fa-shipping-fast"></i> Lift Commerce Connector</span>
+            <span class="navbar-text">
+                <i class="fas fa-user me-1"></i>{{ username }} | 
+                <a href="/documentation" class="text-white text-decoration-none me-3"><i class="fas fa-book"></i> Docs</a>
+                <i class="fas fa-circle text-success"></i> Online
+            </span>
+        </div>
+    </nav>
+    
+    <div class="container mt-4">
+        <div class="alert alert-info alert-dismissible fade show" role="alert">
+            <i class="fas fa-shield-alt"></i> <strong>Secure Dashboard</strong> - You are logged in as {{ username }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        
+        <div class="row">
+            <div class="col-md-3">
+                <div class="card bg-primary text-white">
+                    <div class="card-body text-center">
+                        <h3>{{ metrics.total_syncs }}</h3>
+                        <p><i class="fas fa-sync"></i> Total Syncs</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body text-center">
+                        <h3>{{ metrics.successful_syncs }}</h3>
+                        <p><i class="fas fa-check-circle"></i> Successful</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-danger text-white">
+                    <div class="card-body text-center">
+                        <h3>{{ metrics.failed_syncs }}</h3>
+                        <p><i class="fas fa-times-circle"></i> Failed</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-warning text-white">
+                    <div class="card-body text-center">
+                        <h3>{{ metrics.pending_syncs }}</h3>
+                        <p><i class="fas fa-clock"></i> Pending</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="fas fa-cog"></i> Lift Commerce Configuration
+                        <span class="badge bg-secondary ms-2">Protected</span>
+                    </div>
+                    <div class="card-body">
+                        <form method="post" action="/config">
+                            <div class="mb-3">
+                                <label class="form-label">API URL</label>
+                                <input type="url" class="form-control" name="api_url" value="{{ config.api_url }}" placeholder="https://api.liftcommerce.com" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">API Key</label>
+                                <input type="password" class="form-control" name="api_key" value="{{ config.api_key }}" placeholder="Your API Key" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Warehouse ID</label>
+                                <input type="text" class="form-control" name="warehouse_id" value="{{ config.warehouse_id }}" placeholder="Warehouse ID" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Configuration</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header"><i class="fas fa-bolt"></i> Quick Actions</div>
+                    <div class="card-body">
+                        <button class="btn btn-success me-2" onclick="fetchOrders()"><i class="fas fa-download"></i> Fetch Orders</button>
+                        <button class="btn btn-info me-2" onclick="location.reload()"><i class="fas fa-refresh"></i> Refresh</button>
+                        <button class="btn btn-secondary" onclick="testConnection()"><i class="fas fa-plug"></i> Test</button>
+                    </div>
+                </div>
+                {% if recent_syncs %}
+                <div class="card mt-3">
+                    <div class="card-header"><i class="fas fa-history"></i> Recent Syncs</div>
+                    <div class="card-body">
+                        {% for sync in recent_syncs %}
+                        <div class="d-flex justify-content-between border-bottom py-2">
+                            <div>
+                                <strong>Order {{ sync.order_id }}</strong><br>
+                                <small class="text-muted">{{ sync.created_at[:19] }}</small>
+                                {% if sync.synced_by %}
+                                <br><small class="text-info">by {{ sync.synced_by }}</small>
+                                {% endif %}
+                            </div>
+                            <span class="badge bg-success">{{ sync.status.title() }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <i class="fas fa-shopping-cart"></i> Ready Orders
+                        <span class="badge bg-warning text-dark ms-2">Sensitive Data</span>
+                    </div>
+                    <div class="card-body" id="orders">
+                        <p class="text-muted">Click "Fetch Orders" to load from Odoo.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function fetchOrders() {
+            fetch('/orders/ready').then(r => r.json()).then(data => {
+                const div = document.getElementById('orders');
+                if (data.orders && data.orders.length) {
+                    let html = '<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i> <strong>Sensitive Data:</strong> Customer order information below</div>';
+                    html += '<div class="table-responsive"><table class="table table-striped"><thead><tr><th>Order</th><th>Customer</th><th>Amount</th><th>Date</th><th>Action</th></tr></thead><tbody>';
+                    data.orders.forEach(o => {
+                        html += `<tr>
+                            <td><strong>${o.name}</strong></td>
+                            <td>${o.partner_id[1]}</td>
+                            <td>$${o.amount_total||0}</td>
+                            <td>${o.date_order ? o.date_order.split(' ')[0] : 'N/A'}</td>
+                            <td><button onclick="syncOrder(${o.id})" class="btn btn-sm btn-primary"><i class="fas fa-sync"></i> Sync</button></td>
+                        </tr>`;
+                    });
+                    html += '</tbody></table></div>';
+                    div.innerHTML = html;
+                } else {
+                    div.innerHTML = '<p class="text-muted">No ready orders found.</p>';
+                }
+            }).catch(error => {
+                console.error('Error:', error);
+                document.getElementById('orders').innerHTML = '<div class="alert alert-danger">Error fetching orders: Authentication may be required</div>';
+            });
+        }
+        
+        function syncOrder(id) {
+            fetch(`/orders/${id}/sync`, {method: 'POST'})
+                .then(r => r.json())
+                .then(d => {
+                    alert(d.message);
+                    setTimeout(() => location.reload(), 1000);
+                })
+                .catch(error => {
+                    alert('Error syncing order: ' + error);
+                });
+        }
+        
+        function testConnection() {
+            fetch('/health')
+                .then(r => r.json())
+                .then(d => alert('✅ Connection successful! Status: ' + d.status))
+                .catch(error => alert('❌ Connection failed: ' + error));
+        }
+    </script>
+</body>
+</html>

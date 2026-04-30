@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtualenv
+venv/
+.venv/
+env/
+
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+
+# Backups
+*.backup
+*.backup-*
+*.bak
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
