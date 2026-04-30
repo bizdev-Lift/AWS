@@ -76,14 +76,17 @@ class LiftCommerceWebShipAPI:
         url = f"{self.base_url}/customers/{self.customer_id}/integrations/{self.integration_id}/orders/{order_id}"
 
         # Per Ray (Apr 30 demo): orders should land in WebShip queue without
-        # a service preselected so AWDUS staff pick the carrier on their side
-        # and avoid auto-print of ground economy. Empty string was rejected
-        # by Lift validator (min length), so omit the key entirely.
+        # the service preselected so AWDUS staff pick the carrier on their
+        # side and avoid auto-print of ground economy. Lift's PUT order
+        # schema requires the `shippingService` key (omitting → 422; empty
+        # string → 422 min-length), so we send "Manual" as a placeholder
+        # that signals "no specific service selected — WebShip user picks".
         payload = {
             "orderId": str(order_id),
             "orderDate": order_date,
             "orderNumber": order_number,
             "fulfillmentStatus": "pending",
+            "shippingService": "Manual",
             "shippingTotal": str(shipping_total),
             "weightUnit": weight_unit,
             "dimUnit": dim_unit,
