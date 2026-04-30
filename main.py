@@ -528,16 +528,41 @@ class OdooConnector:
                         [partner_id],
                         {'fields': ['name', 'street', 'street2', 'city', 'state_id', 'zip', 'country_id', 'phone']}
                     )[0]
-                    
+
+                    # Lift Commerce API requires 2-letter ISO codes for state/country.
+                    # Odoo's *_id[1] returns the display name (e.g. "California (US)",
+                    # "United States") which fails Lift's `^[A-Z][A-Z]$` validator with
+                    # 422. Resolve `.code` from res.country / res.country.state instead.
+                    state_code = ''
+                    if address_data.get('state_id'):
+                        state_rec = self.models.execute_kw(
+                            ODOO_DB, self.uid, ODOO_API_KEY,
+                            'res.country.state', 'read',
+                            [[address_data['state_id'][0]]],
+                            {'fields': ['code']}
+                        )
+                        if state_rec:
+                            state_code = state_rec[0].get('code', '') or ''
+                    country_code = 'US'
+                    if address_data.get('country_id'):
+                        country_rec = self.models.execute_kw(
+                            ODOO_DB, self.uid, ODOO_API_KEY,
+                            'res.country', 'read',
+                            [[address_data['country_id'][0]]],
+                            {'fields': ['code']}
+                        )
+                        if country_rec:
+                            country_code = (country_rec[0].get('code') or 'US')
+
                     shipping_address = ShippingAddress(
-                        name=address_data.get('name', ''),
-                        street1=address_data.get('street', ''),
-                        street2=address_data.get('street2', ''),
-                        city=address_data.get('city', ''),
-                        state=address_data['state_id'][1] if address_data.get('state_id') else '',
-                        zip_code=address_data.get('zip', ''),
-                        country=address_data['country_id'][1] if address_data.get('country_id') else 'US',
-                        phone=address_data.get('phone', '')
+                        name=address_data.get('name', '') or '',
+                        street1=address_data.get('street', '') or '',
+                        street2=address_data.get('street2', '') or '',
+                        city=address_data.get('city', '') or '',
+                        state=state_code,
+                        zip_code=address_data.get('zip', '') or '',
+                        country=country_code,
+                        phone=address_data.get('phone', '') or ''
                     )
                     
                     # Get order line products
@@ -894,7 +919,27 @@ async def process_orders():
                         break
 
                 if not target_order:
-                    logger.warning(f"Order {order_id} not found in Odoo")
+                    # Order is in our queue but Odoo no longer returns it (likely
+                    # delivered/archived). Without this UPDATE the row would stay
+                    # `pending` with retry_count=0 forever and block all newer
+                    # orders behind the SELECT LIMIT 10. Increment retry so the
+                    # row gets marked `failed` after 3 cycles and falls out of
+                    # the queue head.
+                    logger.warning(f"Order {order_id} not found in Odoo — marking as stale")
+                    if db_manager.connection:
+                        stale_cur = db_manager.connection.cursor()
+                        stale_cur.execute("""
+                            UPDATE processed_orders
+                            SET retry_count = retry_count + 1,
+                                error_message = 'Order no longer in Odoo ready list',
+                                last_sync_attempt = NOW(),
+                                status = CASE
+                                    WHEN retry_count + 1 >= 3 THEN 'failed'
+                                    ELSE 'pending'
+                                END
+                            WHERE order_id = %s
+                        """, (order_id,))
+                        stale_cur.close()
                     continue
 
                 # Create shipment using Book Shipment API
