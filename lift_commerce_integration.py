@@ -159,20 +159,58 @@ class LiftCommerceAPI:
 
     def _normalize_address(self, address: Dict, is_sender: bool) -> Dict:
         """
-        Normalize address to match API requirements
-        All fields required, use empty string if not provided
+        Normalize address to match Lift API + downstream FedEx requirements.
+
+        - safe_str: Odoo returns False (not None/"") for empty fields → coerce to "".
+        - Phone: Lift validator rejects empty / <10-digit phones with 422.
+          Strip non-digits, pad short numbers, use a placeholder when empty
+          so the API call doesn't fail on data-quality issues we can't fix.
+        - Address fields: FedEx caps each address line at 35 chars (Lift
+          surfaces this as a 500). If address1 is longer and address2 empty,
+          smart-split at the last space within the limit so we don't cut a
+          word; otherwise truncate.
         """
+        def safe_str(val):
+            if val is None or val is False:
+                return ""
+            return str(val)
+
+        FEDEX_LINE_MAX = 35
+
+        def truncate(s: str, limit: int = FEDEX_LINE_MAX) -> str:
+            return s[:limit] if len(s) > limit else s
+
+        addr1_raw = safe_str(address.get("address1") or address.get("street") or "")
+        addr2_raw = safe_str(address.get("address2") or address.get("street2") or "")
+        if len(addr1_raw) > FEDEX_LINE_MAX and not addr2_raw:
+            cutoff = addr1_raw[:FEDEX_LINE_MAX].rfind(' ')
+            if cutoff > FEDEX_LINE_MAX // 2:
+                addr1, addr2 = addr1_raw[:cutoff], addr1_raw[cutoff + 1:]
+            else:
+                addr1, addr2 = addr1_raw[:FEDEX_LINE_MAX], ""
+        else:
+            addr1, addr2 = addr1_raw, addr2_raw
+
+        phone_raw = safe_str(address.get("phone", ""))
+        phone_digits = ''.join(c for c in phone_raw if c.isdigit())
+        if not phone_digits:
+            phone = "0000000000"
+        elif len(phone_digits) < 10:
+            phone = phone_digits.ljust(10, "0")
+        else:
+            phone = phone_digits
+
         return {
-            "name": address.get("name", ""),
-            "company": address.get("company", ""),
-            "address1": address.get("address1", address.get("street", "")),
-            "address2": address.get("address2", address.get("street2", "")),
-            "city": address.get("city", ""),
-            "state": address.get("state", ""),
-            "zip": address.get("zip", address.get("zip_code", "")),
-            "country": address.get("country", "US"),
-            "phone": address.get("phone", ""),
-            "email": address.get("email", "")
+            "name": truncate(safe_str(address.get("name", ""))),
+            "company": truncate(safe_str(address.get("company", ""))),
+            "address1": truncate(addr1),
+            "address2": truncate(addr2),
+            "city": truncate(safe_str(address.get("city", ""))),
+            "state": safe_str(address.get("state", "")),
+            "zip": safe_str(address.get("zip") or address.get("zip_code") or ""),
+            "country": safe_str(address.get("country", "US")) or "US",
+            "phone": phone,
+            "email": safe_str(address.get("email", "")),
         }
 
     def _normalize_packages(self, packages: list, service_code: str) -> list:
