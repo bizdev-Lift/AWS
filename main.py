@@ -692,23 +692,25 @@ class OdooConnector:
             )
             if is_smartpost:
                 try:
-                    note_html = (
-                        f"<p>📦 Tracking updated: <code>{tracking_number}</code></p>"
-                        "<p><em>This is a FedEx SmartPost shipment. WebShip may "
+                    # Plain text — Odoo's message_post over XML-RPC escapes raw
+                    # HTML in `body`, so we let Odoo wrap our text in <p> itself.
+                    # Result renders cleanly as a chatter note.
+                    note_lines = [
+                        f"📦 Tracking updated: {tracking_number}",
+                        "",
+                        "This is a FedEx SmartPost shipment. WebShip may "
                         "display a shorter USPS handoff number"
-                    )
-                    if secondary_tracking:
-                        note_html += f" (<code>{secondary_tracking}</code>)"
-                    note_html += (
-                        " for the last-mile delivery — both numbers track the "
-                        "same parcel. Either can be entered at fedex.com.</em></p>"
-                    )
+                        + (f" ({secondary_tracking})" if secondary_tracking else "")
+                        + " for the last-mile delivery — both numbers track "
+                        "the same parcel. Either can be entered at fedex.com.",
+                    ]
+                    note_body = "\n".join(note_lines)
                     self.models.execute_kw(
                         ODOO_DB, self.uid, ODOO_API_KEY,
                         'sale.order', 'message_post',
                         [sale_order_ids],
                         {
-                            'body': note_html,
+                            'body': note_body,
                             'message_type': 'comment',
                             'subtype_xmlid': 'mail.mt_note',
                         },
